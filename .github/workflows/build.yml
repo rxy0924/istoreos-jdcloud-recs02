@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: build-recs02
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -54,11 +54,20 @@ jobs:
         run: |
           cd openwrt
           cp ../config/re-cs-02.config .config
+          echo 'src-git kenzo https://github.com/kenzok8/small-package.git' >> feeds.conf.default
+          tail -3 feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           make defconfig
           echo "---- 关键配置 ----"
-          grep -E "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE|CONFIG_TARGET_ROOTFS_INITRAMFS|CONFIG_PACKAGE_luci-app-store|CONFIG_PACKAGE_istore" .config || true
+          grep -E "DEVICE_jdcloud_re-cs-02|luci-app-lucky|lucky=|clashoo|luci-app-oaf|open-app-filter|luci-app-store|CONFIG_PACKAGE_istore=" .config || true
+          echo "---- 包存在性校验 ----"
+          missing=0
+          for p in luci-app-lucky lucky luci-app-clashoo clashoo luci-app-oaf open-app-filter; do
+            if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then echo "OK   ${p}"; else echo "MISS ${p}"; missing=1; fi
+          done
+          if ! grep -q "DEVICE_jdcloud_re-cs-02=y" .config; then echo "MISS device"; missing=1; fi
+          [ "$missing" = "0" ] || { echo '!! 关键包未选中，终止'; exit 1; }
 
       - name: 下载源码包
         run: |
