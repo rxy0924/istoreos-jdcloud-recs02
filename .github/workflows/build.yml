@@ -5,6 +5,9 @@ on:
   push:
     branches: [ main ]
 
+permissions:
+  contents: write
+
 concurrency:
   group: build-recs02
   cancel-in-progress: true
@@ -55,7 +58,6 @@ jobs:
           cd openwrt
           cp ../config/re-cs-02.config .config
           echo 'src-git kenzo https://github.com/kenzok8/small-package.git' >> feeds.conf.default
-          tail -3 feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           make defconfig
@@ -82,7 +84,46 @@ jobs:
           echo "---- 产物 ----"
           ls -lh bin/targets/qualcommax/ipq60xx/
 
-      - name: 上传编译产物
+      - name: 校验 sysupgrade 兼容性并生成报告
+        if: success()
+        run: |
+          cd openwrt
+          FW=$(ls bin/targets/qualcommax/ipq60xx/*squashfs-sysupgrade.bin | head -1)
+          {
+            echo "# 构建报告"; echo
+            echo "- 运行编号：#${{ github.run_number }}"
+            echo "- 源码：istoreos-25.12（$(git rev-parse --short HEAD 2>/dev/null || echo n/a)）"
+            echo "- 构建时间：$(date -u '+%Y-%m-%d %H:%M UTC')"; echo
+            echo "## 产物"; echo '```'; ls -lh bin/targets/qualcommax/ipq60xx/; echo '```'; echo
+            echo "## SHA256"; echo '```'; sha256sum bin/targets/qualcommax/ipq60xx/*; echo '```'; echo
+            echo "## sysupgrade 兼容元数据（fwtool -i）"; echo '```'
+            ./staging_dir/host/bin/fwtool -i "$FW" || echo 'fwtool 读取失败'
+            echo '```'; echo
+            echo "## sysupgrade 包内容"; echo '```'; tar tf "$FW" | head -20; echo '```'
+          } > ../build-report.md
+          cat ../build-report.md
+
+      - name: 提交构建报告（[skip ci]）
+        if: success()
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add build-report.md
+          git commit -m 'update build report [skip ci]' || echo 'no change'
+          git push
+
+      - name: 上传到 Release（可直接下载）
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: iStoreOS RE-CS-02 build #${{ github.run_number }}
+          body_path: build-report.md
+          files: |
+            openwrt/bin/targets/qualcommax/ipq60xx/*
+          fail_on_unmatched_files: false
+
+      - name: 上传编译产物（Artifact）
         if: always()
         uses: actions/upload-artifact@v4
         with:
