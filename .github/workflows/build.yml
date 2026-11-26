@@ -76,14 +76,21 @@ jobs:
           make defconfig 2>&1 | tee -a ../setup.log
           echo '---- 关键配置 ----' | tee -a ../setup.log
           grep -E 'DEVICE_jdcloud_re-cs-02|lucky|clash|oaf|appfilter|luci-app-store|CONFIG_PACKAGE_istore=' .config | tee -a ../setup.log || true
+          echo '---- luci-app-lucky 依赖诊断 ----' | tee -a ../setup.log
+          grep -A 14 '^config PACKAGE_luci-app-lucky$' tmp/.config-package.in | tee -a ../setup.log || true
+          for d in lua libubus-lua libuci-lua luci-lib-nixio luci-lib-jsonc luci-lib-ip rpcd-mod-file; do
+            sym=$(grep -c "^config PACKAGE_${d}$" tmp/.config-package.in || true)
+            val=$(grep -E "^CONFIG_PACKAGE_${d}=" .config | head -1)
+            echo "dep ${d}: kconfig_present=${sym} config=${val:-<none>}" | tee -a ../setup.log
+          done
           echo '---- 包存在性校验 ----' | tee -a ../setup.log
           missing=0
-          for p in luci-app-lucky lucky luci-app-clash; do
+          for p in lucky luci-app-clash; do
             if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then echo "OK   ${p}" | tee -a ../setup.log; else echo "MISS ${p}" | tee -a ../setup.log; missing=1; fi
           done
           if ! grep -q 'DEVICE_jdcloud_re-cs-02=y' .config; then echo 'MISS device' | tee -a ../setup.log; missing=1; fi
-          for p in luci-app-oaf appfilter kmod-oaf; do
-            if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then echo "OK   ${p}" | tee -a ../setup.log; else echo "WARN ${p} 未选中（将不影响主体编译）" | tee -a ../setup.log; fi
+          for p in luci-app-lucky luci-app-oaf appfilter kmod-oaf; do
+            if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then echo "OK   ${p}" | tee -a ../setup.log; else echo "WARN ${p} 未选中（不影响主体编译）" | tee -a ../setup.log; fi
           done
           [ "$missing" = "0" ] || { echo '!! 关键包未选中，终止' | tee -a ../setup.log; exit 1; }
 
