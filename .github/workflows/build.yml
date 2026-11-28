@@ -58,7 +58,7 @@ jobs:
           set -o pipefail
           git clone --depth 1 https://github.com/kenzok8/small-package.git /tmp/kenzo 2>&1 | tail -3
           git clone --depth 1 https://github.com/destan19/OpenAppFilter.git /tmp/oafsrc 2>&1 | tail -3
-          for d in lucky luci-app-lucky luci-app-clash; do
+          for d in lucky luci-app-lucky luci-app-openclash; do
             cp -a "/tmp/kenzo/$d" "openwrt/package/$d"
           done
           for d in oaf open-app-filter luci-app-oaf; do
@@ -76,21 +76,14 @@ jobs:
           make defconfig 2>&1 | tee -a ../setup.log
           echo '---- 关键配置 ----' | tee -a ../setup.log
           grep -E 'DEVICE_jdcloud_re-cs-02|lucky|clash|oaf|appfilter|luci-app-store|CONFIG_PACKAGE_istore=' .config | tee -a ../setup.log || true
-          echo '---- luci-app-lucky 依赖诊断 ----' | tee -a ../setup.log
-          grep -A 14 '^config PACKAGE_luci-app-lucky$' tmp/.config-package.in | tee -a ../setup.log || true
-          for d in lua libubus-lua libuci-lua luci-lib-nixio luci-lib-jsonc luci-lib-ip rpcd-mod-file; do
-            sym=$(grep -c "^config PACKAGE_${d}$" tmp/.config-package.in || true)
-            val=$(grep -E "^CONFIG_PACKAGE_${d}=" .config | head -1)
-            echo "dep ${d}: kconfig_present=${sym} config=${val:-<none>}" | tee -a ../setup.log
-          done
           echo '---- 包存在性校验 ----' | tee -a ../setup.log
           missing=0
-          for p in lucky luci-app-clash; do
+          for p in lucky luci-app-openclash; do
             if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then echo "OK   ${p}" | tee -a ../setup.log; else echo "MISS ${p}" | tee -a ../setup.log; missing=1; fi
           done
           if ! grep -q 'DEVICE_jdcloud_re-cs-02=y' .config; then echo 'MISS device' | tee -a ../setup.log; missing=1; fi
           for p in luci-app-lucky luci-app-oaf appfilter kmod-oaf; do
-            if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then echo "OK   ${p}" | tee -a ../setup.log; else echo "WARN ${p} 未选中（不影响主体编译）" | tee -a ../setup.log; fi
+            if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then echo "OK   ${p}" | tee -a ../setup.log; else echo "WARN ${p} 未选中（不阻断编译）" | tee -a ../setup.log; fi
           done
           [ "$missing" = "0" ] || { echo '!! 关键包未选中，终止' | tee -a ../setup.log; exit 1; }
 
@@ -101,19 +94,46 @@ jobs:
           make -j"$(nproc)" download 2>&1 | tee ../download.log || make -j"$(nproc)" download 2>&1 | tee -a ../download.log || true
           df -h /
 
-      - name: 编译
+      - name: 编译（失败时逐级剔除第三方应用）
         run: |
           set -o pipefail
           cd openwrt
+
+          show_errors() {
+            echo '---- 失败点 ----' | tee -a build.log
+            grep -nE 'ERROR: |Error 2$|Error 1$|error: ' build.log | tail -20 | tee -a build.log || true
+          }
+
+          disable() {
+            for s in "$@"; do
+              sed -i -E "s/^CONFIG_PACKAGE_${s}=y/# CONFIG_PACKAGE_${s} is not set/" .config
+            done
+            make oldconfig </dev/null >/dev/null 2>&1 || true
+            echo "[回退] 已关闭: $*" | tee -a build.log
+          }
+
           if ! make -j"$(nproc)" 2>&1 | tee build.log; then
-            echo '!! 首次编译失败，去掉 OAF 相关包后重试' | tee -a build.log
-            sed -i -E 's/^CONFIG_PACKAGE_kmod-oaf=y/# CONFIG_PACKAGE_kmod-oaf is not set/; s/^CONFIG_PACKAGE_appfilter=y/# CONFIG_PACKAGE_appfilter is not set/; s/^CONFIG_PACKAGE_luci-app-oaf=y/# CONFIG_PACKAGE_luci-app-oaf is not set/' .config
-            grep -E 'oaf|appfilter' .config | tee -a build.log || true
-            make oldconfig </dev/null 2>&1 | tail -5 | tee -a build.log || true
-            make -j"$(nproc)" 2>&1 | tee -a build.log
+            show_errors
+            echo '>> 回退 1：移除 OAF 三件套' | tee -a build.log
+            disable kmod-oaf appfilter luci-app-oaf luci-i18n-oaf-zh-cn
+            if ! make -j"$(nproc)" >> build.log 2>&1; then
+              show_errors
+              echo '>> 回退 2：移除 OpenClash' | tee -a build.log
+              disable luci-app-openclash luci-i18n-openclash-zh-cn
+              if ! make -j"$(nproc)" >> build.log 2>&1; then
+                show_errors
+                echo '>> 回退 3：移除 Lucky' | tee -a build.log
+                disable lucky luci-app-lucky luci-i18n-lucky-zh-cn
+                make -j"$(nproc)" >> build.log 2>&1
+              fi
+            fi
           fi
+
           echo '---- 产物 ----'
-          ls -lh bin/targets/qualcommax/ipq60xx/
+          ls -lh bin/targets/qualcommax/ipq60xx/ || true
+          echo '---- 最终内置应用 ----'
+          grep -E '^CONFIG_PACKAGE_(lucky|luci-app-lucky|luci-app-openclash|luci-app-oaf|appfilter|kmod-oaf)=y' .config > ../final-apps.txt || true
+          cat ../final-apps.txt
 
       - name: 生成构建报告
         if: always()
@@ -130,6 +150,7 @@ jobs:
             echo '```'
             ls -lh bin/targets/qualcommax/ipq60xx/ 2>/dev/null || echo '(无产物目录)'
             echo '```'
+            if [ -s ../final-apps.txt ]; then echo; echo "## 最终内置应用"; echo '```'; cat ../final-apps.txt; echo '```'; else echo; echo "## 最终内置应用"; echo '```'; echo '(全部第三方应用均被剔除)'; echo '```'; fi
             if ls bin/targets/qualcommax/ipq60xx/*squashfs-sysupgrade.bin >/dev/null 2>&1; then
               FW=$(ls bin/targets/qualcommax/ipq60xx/*squashfs-sysupgrade.bin | head -1)
               echo; echo "## SHA256"; echo '```'; sha256sum bin/targets/qualcommax/ipq60xx/*; echo '```'
@@ -140,14 +161,17 @@ jobs:
             fi
             if [ "${{ job.status }}" != "success" ]; then
               echo; echo "## setup.log 末尾"; echo '```'
-              tail -n 60 ../setup.log 2>/dev/null || echo '(无 setup.log)'
+              tail -n 40 ../setup.log 2>/dev/null || echo '(无 setup.log)'
+              echo '```'
+              echo; echo "## build.log 错误行"; echo '```'
+              grep -nE 'ERROR: |Error 2$|Error 1$|error: |回退' build.log 2>/dev/null | tail -40 || echo '(无)'
               echo '```'
               echo; echo "## build.log 末尾"; echo '```'
-              tail -n 150 build.log 2>/dev/null || echo '(无 build.log)'
+              tail -n 60 build.log 2>/dev/null || echo '(无 build.log)'
               echo '```'
             fi
           } > ../build-report.md
-          head -40 ../build-report.md
+          head -50 ../build-report.md
 
       - name: 提交构建报告（[skip ci]）
         if: always()
@@ -178,6 +202,7 @@ jobs:
           path: |
             openwrt/bin/targets/qualcommax/ipq60xx/*
             openwrt/.config
+            final-apps.txt
           if-no-files-found: warn
           compression-level: 1
 
